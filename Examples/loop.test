@@ -1,0 +1,25 @@
+x: while a loop
+	a:= b + 1;
+	f:= 5;
+	//t := f + 10;
+	y: while c loop
+		d := 5/2;
+		exit x;
+		z: loop
+			c := abs(c);
+			if c=2 then
+				exit x;
+			end if;
+			exit y;
+		end loop;
+		j := sqrt(f*10);
+		exit x;
+	end loop;
+	d := f + 2;
+end loop;
+
+t: while c loop
+    c:=10;
+end loop;
+
+k := a + b + c;

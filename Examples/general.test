@@ -1,0 +1,22 @@
+a := sqrt(5) + abs(c);
+d := -5 ++3;
+d := abs(-5) - ^d; //move D1, d and move D2, d
+b := a = 0;
+if c then
+    x: while c loop
+        c := d/2;
+        if d=0 then
+            exit x;
+        end if;
+    end loop;
+    x := 5;
+    c := c | x;
+end if;
+
+y: loop
+    get(a, b, c, d);
+    put("result ", a, b, c);
+    if x >= 5 then
+        exit y;
+    end if;
+end loop;

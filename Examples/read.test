@@ -1,0 +1,6 @@
+a:= "dskja ";
+b:= a-x;
+get (x, b);
+y := 5;
+get(y);
+put(a, " Hello World ");

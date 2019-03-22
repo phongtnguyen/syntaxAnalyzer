@@ -1,0 +1,1362 @@
+/**
+ * Name: Phong Nguyen
+ * Class: Compiler Design
+ */
+
+options {
+	STATIC = false;
+}
+
+PARSER_BEGIN(Compiler)
+
+import java.util.*;
+import java.io.*; 
+
+public class Compiler {
+	static ArrayList<Quad> quadTable = new ArrayList<Quad>();
+	static Stack<String> aStack = new Stack<String>();
+	static HashMap<String, SymbolAttr> symbolTable = new HashMap<String, SymbolAttr>();
+	static ArrayList<Integer> basicBlockLeader = new ArrayList<Integer>();
+	static ArrayList<RegNode> regTable = new ArrayList<RegNode>();
+	static ArrayList<Integer> quadAddress = new ArrayList<Integer>();
+	static ArrayList<AssemblyCode> assemblyCode = new ArrayList<AssemblyCode>();
+	static File output;
+	static final int MAX_REG = 4;
+	int tempCount = 0;
+	static int lineCount = 0;
+	String nextQuad = "1";
+	
+	public static void main(String[] args)  throws IOException {
+		if (args.length<1) {
+			System.out.println("usage: java [file-name] [output-file-name] < [input-file-name]");
+			System.exit(0);
+		}
+		output = new File(args[0]);
+		FileWriter fw = new FileWriter(output);
+		Quad firstQuad = new Quad("empty", null, "0", null, "0", null, "0");
+		quadTable.add(firstQuad);
+		quadAddress.add(-1);
+		try {
+			Compiler parser = new Compiler(System.in);
+			parser.Start();
+		} catch (ParseException pe) {
+			System.out.println("Parse Exception");
+		} catch (TokenMgrError tme) {
+			System.out.println("Token Manager Error");
+		}
+		//printStack(aStack);
+		findBasicBlock(quadTable, symbolTable);
+		//printQuad(quadTable);
+		//printST(symbolTable);
+		
+		//initilize regTable
+		for (int i = 0; i<MAX_REG; i++) {
+			RegNode rn = new RegNode("_head", null);
+			regTable.add(rn);
+		}
+
+		// Code Gen for basic blocks
+		for (int i = 0; i<basicBlockLeader.size(); i++) {
+			if (basicBlockLeader.get(i)>=quadTable.size())
+				break;
+			if (i+1==basicBlockLeader.size()) {
+				codeGen(quadTable, symbolTable, basicBlockLeader.get(i), quadTable.size()-1);
+				break;
+			}
+			codeGen(quadTable, symbolTable, basicBlockLeader.get(i), basicBlockLeader.get(i+1) - 1);
+		}
+		//codeGen(quadTable, symbolTable);
+		//printQuadAddr();
+		fixJumpAddr();
+		System.out.println("***********ASSEMBLY CODE GENERATING***********");
+		printAssemblyCode(fw);
+		fw.flush();
+		fw.close();
+	}
+
+	/**
+	 * generate assembly code for each quad in a basic block
+	 * @param qt - quadTable
+	 * @param st - symbolTable
+	 * @param first - start of basic block
+	 * @param last - end of basic block
+	 */
+	static void codeGen(ArrayList<Quad> qt, HashMap<String, SymbolAttr> st, int first, int last) {
+		for (int i=first; i<=last; i++) { //quad table starts at 1
+			Quad q = qt.get(i);
+			quadAddress.add(lineCount);
+			//System.out.println("Gen code " + q.op + " " + q.reg1 + " " + q.r1nextUse + " " + q.reg2 +" " + q.r2nextUse + " " + q.loc + " " + q.locNextUse);
+			if ( (( (q.op).equals("+") || (q.op).equals("-") ) && q.reg2==null) || (q.op).equals("sqrt") || (q.op).equals("abs") || (q.op).equals("^") ) {
+				int r = getReg(q.reg1, q.r1nextUse);
+				String reg = "D" + Integer.toString(r);
+				if (st.containsKey(q.reg1)) {
+					una_BisId(q, reg);
+				} else
+					una_BisNum(q, reg);
+				updateSymbolTable(q.loc, symbolTable.get(q.loc), reg);
+				updateRegTableAddId(q.loc, r);
+			} else if ( (q.op).equals("+") || (q.op).equals("-") || (q.op).equals("*") || (q.op).equals("/") || (q.op).equals("and") || (q.op).equals("or") ) {
+				//arithmetic and logical op
+				int r = getReg(q.reg1, q.r1nextUse);
+				String reg = "D" + Integer.toString(r);
+				//System.out.println("Got reg " + reg + " for " + q.reg1 + " next use " + q.r1nextUse);
+				if (st.containsKey(q.reg1)) //B is an id
+					arith_BisId(q, reg);
+				else //B is a number
+					arith_BisNum(q, reg);
+				updateSymbolTable(q.loc, symbolTable.get(q.loc), reg);
+				updateRegTableAddId(q.loc, r);
+			} else if ( (q.op).equals("assign")) {
+				assign_CodeGen(q);
+			} else if ( (q.op).equals("<") || (q.op).equals("<=") || (q.op).equals("=") || (q.op).equals("/=") || (q.op).equals(">=") || (q.op).equals(">") ) {
+				rel_CodeGen(q);
+			} else if ((q.op).equals("jump")){
+				jump_CodeGen(q);
+			} else if ((q.op).equals("jeqz")){
+				jeqz_CodeGen(q);
+			} else if ((q.op).equals("read")) {
+				read_CodeGen(q);
+			} else if ((q.op).equals("writeStr")) {
+				writeStr_CodeGen(q);
+			} else if ((q.op).equals("writeInt")) {
+				writeInt_CodeGen(q);
+			}
+			//printST(st);
+			//printRegTable();
+		}
+		/****
+		 * END OF BASIC BLOCK WRITE EVERYTHING TO MEM
+		 */
+		//System.out.println("Store to mem "+first+" "+last);
+		//if ( !(q.op).equals("jump") && !(q.op).equals("jeqz") )
+		storeRegToMem();
+	}
+
+	/**
+	 * generate assembly code for GET statement
+	 * @param q
+	 */
+	static void read_CodeGen(Quad q) { //q.loc can only be id
+		SymbolAttr sa = symbolTable.get(q.loc); //should not return null
+		if (sa.address==null || sa.address.equals("0")) {
+			System.out.println("Invalid GET "+q.loc+" address is " + sa.address);
+		} else if ((sa.address).equals("mem")) { //id not in mem
+			int r = getReg(q.loc, q.locNextUse);
+			genCode("move", q.loc, "D"+Integer.toString(r));
+			updateRegTableAddId(q.loc, r);
+		} // if q.loc is already in reg, do nothing
+	}
+
+	/**
+	 * generate assembly code for PUT statement with string argument
+	 * @param q
+	 */
+	static void writeStr_CodeGen(Quad q) {
+		int r = getReg(q.reg1, q.r1nextUse);
+		genCode("move", "$"+q.reg1, "D"+Integer.toString(r));
+		System.out.println("put "+"D"+Integer.toString(r)+", stdout");
+	}
+
+	/**
+	 * generate assembly code for PUT statement with id argument
+	 * @param q
+	 */
+	static void writeInt_CodeGen(Quad q) {
+		SymbolAttr sa = symbolTable.get(q.reg1);
+		if (sa.address==null || sa.address.equals("0")) {
+			System.out.println("Invalid PUT "+q.reg1+" address is " + sa.address);
+		} else if (sa.address.equals("mem")) {
+			int r = getReg(q.reg1, q.r1nextUse);
+			genCode("move", q.reg1, "D"+Integer.toString(r));
+			updateRegTableAddId(q.reg1, r);
+		} else { // q.reg1 in some reg
+			System.out.println("put "+sa.address+", stdout");
+		}
+	}
+
+	/**
+	 * generate assembly code for conditional jump statement
+	 * @param q
+	 */
+	static void jeqz_CodeGen(Quad q) {
+		int r = inReg(q.reg1);
+		if (r==-1) {
+			r = getReg(q.reg1, q.r1nextUse);
+			if (symbolTable.containsKey(q.reg1))
+				genCode("move", q.reg1, "D"+Integer.toString(r));
+			else
+				genCode("move", "#"+q.reg1, "D"+Integer.toString(r));
+		}
+		storeRegToMem();
+		genCode("tst", "D"+Integer.toString(r), null);
+		//String addr = Integer.toString(quadAddress.get(Integer.parseInt(q.loc)));
+		genCode("jeqz", q.loc, null);
+	}
+
+	/**
+	 * generate assembly code for unconditional jump statement
+	 * @param q
+	 */
+	static void jump_CodeGen(Quad q) {
+		//String addr = Integer.toString(quadAddress.get(Integer.parseInt(q.loc)));
+		storeRegToMem();
+		genCode("jump", q.loc, null);
+	}
+
+	/**
+	 * generate assembly code for relational operation
+	 * @param q
+	 */
+	static void rel_CodeGen(Quad q) {
+		int r = getReg(q.reg1, q.r1nextUse);
+		String reg = "D" + Integer.toString(r);
+		String B_cond = getCond(q.op);
+		if (symbolTable.containsKey(q.reg1))
+			rel_BisId(q, reg, B_cond);
+		else
+			rel_BisNum(q, reg, B_cond);
+
+		updateSymbolTable(q.loc, symbolTable.get(q.loc), reg);
+		updateRegTableAddId(q.loc, r);
+	}
+
+	/**
+	 * generate assembly code for relational operation with id B
+	 * @param q
+	 * @param reg
+	 * @param B_cond
+	 */
+	static void rel_BisId(Quad q, String reg, String B_cond) {
+		int rB = inReg(q.reg1);
+		int rC = inReg(q.reg2);
+		SymbolAttr bAttr = symbolTable.get(q.reg1);
+		SymbolAttr cAttr = symbolTable.get(q.reg2);
+		if (bAttr.address==null || !(bAttr.address).equals(reg)) {
+			if (rB>-1) //B in other reg
+				genCode("move", "D"+Integer.toString(rB), reg);
+			else
+				genCode("move", q.reg1, reg);
+		}
+
+		if (rC>-1)
+			genCode("cmp", "D"+Integer.toString(rC), reg);
+		else
+			genCode("cmp", q.reg2, reg);
+
+		genCode(B_cond, "*+3", null);
+		genCode("clr", reg, null);
+		genCode("bra", "*+2", null);
+		genCode("move", "#1", reg);
+
+		if (!isLive(q.r1nextUse) && rB>-1) {
+			updateRegTableRemoveId(q.reg1, rB);
+			updateSymbolTable(q.reg1, bAttr, null);
+		}
+
+		if (!isLive(q.r2nextUse) && rC>-1) {
+			updateRegTableRemoveId(q.reg2, rC);
+			updateSymbolTable(q.reg2, cAttr, null);
+		}
+	}
+
+	/**
+	 * generate assembly code for relational operation with numeric B
+	 * @param q
+	 * @param reg
+	 * @param B_cond
+	 */
+	static void rel_BisNum(Quad q, String reg, String B_cond) {
+		genCode("move", "#" + q.reg1, reg);
+		genCode("cmp", "#" + q.reg2, reg);
+		genCode(B_cond, "*+3", null);
+		genCode("clr", reg, null);
+		genCode("bra", "*+2", null);
+		genCode("move", "#1", reg);
+	}
+
+	/**
+	 * get conditional jump statement from operator
+	 * @param op
+	 * @return
+	 */
+	static String getCond(String op) {
+		if (op.equals("<"))
+			return "jlt";
+		else if (op.equals("<="))
+			return "jle";
+		else if (op.equals("="))
+			return "jeq";
+		else if (op.equals("/="))
+			return "jne";
+		else if (op.equals(">="))
+			return "jge";
+		else if (op.equals(">"))
+			return "jgt";
+		return null; //should not happen
+	}
+
+	/**
+	 * generate assembly code for assignment operation
+	 * @param q
+	 */
+	static void assign_CodeGen(Quad q) {
+		int rB = inReg(q.reg1);
+		if (rB==-1) {
+			rB = getReg(q.reg1, q.r1nextUse);
+			if (symbolTable.containsKey(q.reg1))
+				genCode("move", q.reg1, "D"+Integer.toString(rB));
+			else
+				genCode("move", "#"+q.reg1, "D"+Integer.toString(rB));
+		}
+		if (symbolTable.containsKey(q.reg1) && !isLive(q.r1nextUse) && rB>-1) { // rB > -1 is redundant?
+			SymbolAttr sa = symbolTable.get(q.reg1);
+			updateRegTableRemoveId(q.reg1, rB);
+			updateSymbolTable(q.reg1, sa, null);
+		}
+
+		SymbolAttr sa = symbolTable.get(q.loc);
+		updateSymbolTable(q.loc, sa, "D"+Integer.toString(rB));
+		updateRegTableAddId(q.loc, rB);
+	}
+
+	/**
+	 * generate assembly code for arithmetic/logical operation with id B
+	 * @param q
+	 * @param reg
+	 */
+	static void arith_BisId(Quad q, String reg) {
+		int rB = inReg(q.reg1), rC = inReg(q.reg2);
+		SymbolAttr bAttr, cAttr;
+		bAttr = symbolTable.get(q.reg1);
+		cAttr = symbolTable.get(q.reg2); //might be null
+		//aAttr = symbolTable.get(q.loc);
+
+		if ( bAttr.address==null || !(bAttr.address).equals(reg)) { //B not in REG
+			//rB = inReg(q.reg1);
+			if (rB>-1) //B in other reg
+				genCode("move", "D"+Integer.toString(rB), reg);
+			else
+				genCode("move", q.reg1, reg);
+		}
+		if ((q.reg1).equals(q.reg2)) //B = C
+			genCode(q.op, reg, reg);
+		else {
+			//rC = inReg(q.reg2);
+			if (rC>-1)
+				genCode(q.op, "D"+Integer.toString(rC), reg);
+			else
+				if (symbolTable.containsKey(q.reg2))
+					genCode(q.op, q.reg2, reg);
+				else
+					genCode(q.op,"#"+q.reg2, reg);
+		}
+
+		//System.out.println(q.reg1 + " in " + rB + " "+ q.reg2 + " in " + rC);
+		if (!isLive(q.r1nextUse) && rB>-1) {
+			//System.out.println("remove "+q.reg1+" from r"+rB);
+			updateRegTableRemoveId(q.reg1, rB);
+			updateSymbolTable(q.reg1, bAttr, null);
+		}
+
+		if (!isLive(q.r2nextUse) && rC>-1) { // doesn't happen if cAttr = null
+			//System.out.println("remove "+q.reg2+" from r"+rC);
+			updateRegTableRemoveId(q.reg2, rC);
+			updateSymbolTable(q.reg2, cAttr, null);
+		}
+	}
+
+	/**
+	 * generate assembly code for arithmetic/logical operation with numeric B
+	 * @param q
+	 * @param reg
+	 */
+	static void arith_BisNum(Quad q, String reg) {
+		genCode("move", "#" + q.reg1, reg);
+		if ((q.reg1).equals(q.reg2))
+			genCode(q.op, reg, reg);
+		else if (symbolTable.containsKey(q.reg2))
+			genCode(q.op, q.reg2, reg);
+		else
+			genCode(q.op, "#" + q.reg2, reg);
+	}
+
+	/**
+	 * generate assembly code for unary operation with id B
+	 * @param q
+	 * @param reg
+	 */
+	static void una_BisId(Quad q, String reg) {
+		int rB = inReg(q.reg1);
+		SymbolAttr bAttr = symbolTable.get(q.reg1);
+
+		if ( bAttr.address==null || !(bAttr.address).equals(reg) ) {
+			if (rB>-1)
+				genCode("move", "D"+Integer.toString(rB), reg);
+			else
+				genCode("move", q.reg1, reg);
+		}
+
+		if (q.op.equals("abs")) {
+			genCode("cmp", "0", reg);
+			genCode("jge", "*+2", null);
+			genCode("neg", reg, null);
+		} else if (!(q.op).equals("+"))
+			genCode(q.op, reg, null);
+
+		if (!isLive(q.r1nextUse) && rB>-1) {
+			//System.out.println("remove "+q.reg1+" from r"+rB);
+			updateRegTableRemoveId(q.reg1, rB);
+			updateSymbolTable(q.reg1, bAttr, null);
+		}
+	}
+
+	/**
+	 * generate assembly code for unary operation with numeric B
+	 * @param q
+	 * @param reg
+	 */
+	static void una_BisNum(Quad q, String reg) {
+		genCode("move", "#" + q.reg1, reg);
+		if (q.op.equals("abs")) {
+			genCode("cmp", "0", reg);
+			genCode("jge", "*+2", null);
+			genCode("neg", reg, null);
+		} else if (!(q.op).equals("+"))
+			genCode(q.op, reg, null);
+	}
+
+	/**
+	 * update address of an entry in Symbol table
+	 * @param id
+	 * @param sa
+	 * @param reg
+	 */
+	static void updateSymbolTable(String id, SymbolAttr sa, String reg) {
+		//System.out.println("update symbol "+id+" "+sa.type+" "+sa.nextUse+" "+reg);
+		symbolTable.put(id, new SymbolAttr(sa.type, sa.nextUse, reg));
+	}
+
+	/**
+	 * add ID to register in Register table
+	 * @param id
+	 * @param r
+	 */
+	static void updateRegTableAddId(String id, int r) {
+		//System.out.println("Add " + id + " to r" + r);
+		RegNode reg = regTable.get(r);
+		while (reg.next!=null)
+			reg = reg.next;
+		RegNode nr = new RegNode(id, null);
+		reg.next = nr;
+	}
+
+	/**
+	 * remove ID from register in Register table
+	 * @param id
+	 * @param r
+	 */
+	static void updateRegTableRemoveId(String id, int r) {
+		//System.out.println("remove "+id+" from r" + r);
+		RegNode reg = regTable.get(r);
+		RegNode prev = reg;
+		while (!(reg.id).equals(id)) {
+			prev = reg;
+			reg = reg.next;
+		}
+		prev.next = reg.next;
+	}
+
+	// NOT USED
+	static void updateRegTableAssignToReg(String id, int reg) { //when assign a value to a reg, remove every node in reg's linked list
+		RegNode r = regTable.get(reg);
+		while (r.next != null)
+			r = r.next;
+		RegNode nr = new RegNode(id, null);
+		r.next = nr;
+	}
+
+	/**
+	 * change quad operator to corresponding assembly operator and increment assembly code line count
+	 * @param op
+	 * @param src
+	 * @param dst
+	 */
+	static void genCode(String op, String src, String dst) {
+		if (op.equals("^")) {
+			//System.out.println(lineCount + " not" + " " + src);
+			op = "not";
+		} else if (op.equals("+") && dst==null) {
+			//System.out.println(lineCount + " pos" + " " + src);
+			op = "pos";
+		} else if (op.equals("-") && dst==null) {
+			//System.out.println(lineCount + " neg" + " " + src);
+			op = "neg";
+		} else if (op.equals("+")) {
+			//System.out.println(lineCount + " add" + " " + src + "," + dst);
+			op = "add";
+		} else if (op.equals("-")) {
+			//System.out.println(lineCount + " sub" + " " + src + "," + dst);
+			op = "sub";
+		} else if (op.equals("*")) {
+			//System.out.println(lineCount + " mul" + " " + src + "," + dst);
+			op = "mul";
+		} else if (op.equals("/")) {
+			//System.out.println(lineCount + " div" + " " + src + "," + dst);
+			op = "div";
+		}
+		assemblyCode.add(new AssemblyCode(op, src, dst));
+		lineCount++;
+	}
+
+	/**
+	 * check if ID is live
+	 * @param nextUse
+	 * @return
+	 */
+	static boolean isLive(String nextUse) {
+		if (nextUse.equals("0"))
+			return false;
+		return true;
+	}
+
+	/**
+	 * check if ID is in any register
+	 * @param id
+	 * @return register if found, -1 otherwise
+	 */
+	static int inReg(String id) {
+		if (symbolTable.containsKey(id)) {	//id in symbol table
+			SymbolAttr sa = symbolTable.get(id);
+			for (int i=0; i<MAX_REG; i++) {
+				String reg = "D" + Integer.toString(i);
+				if (reg.equals(sa.address))
+					return i;
+			}
+			return -1;
+		}
+		return -1;
+	}
+
+	/**
+	 * write value in all registers to memory
+	 */
+	static void storeRegToMem() {
+		for (int i=0; i<MAX_REG; i++) {
+			RegNode rn = regTable.get(i);
+			rn = rn.next;
+			while (rn!=null) {
+				genCode("move", "D"+Integer.toString(i), rn.id);
+				rn = rn.next;
+			}
+		}
+	}
+
+	/**
+	 * get available register
+	 * @param id
+	 * @param nextUse
+	 * @return available register, 0 if runs out of register
+	 */
+	static int getReg(String id, String nextUse) {
+		SymbolAttr sa = symbolTable.get(id);
+		if ( sa!=null && sa.address!=null && !(sa.address).equals("mem") && !isLive(nextUse) ) {
+			int reg = Integer.parseInt((sa.address).substring(1)); //remove character D
+			RegNode rn = regTable.get(reg);
+			rn = rn.next;
+			//System.out.println("B in a reg that holds names: " + rn.id + " " + rn.next);
+			if (rn!=null && rn.next==null) { //only 1 element in reg linked list
+				return reg;
+			}
+		}
+		int reg = emptyRegAvail();
+		if (reg < MAX_REG)
+			return reg;
+		else { //choose a reg -> r0
+			RegNode r0 = regTable.get(0);
+			storeToMem(r0);
+			r0.next = null;
+			return 0;
+		}
+	}
+
+	/**
+	 * write all values in a register to memory
+	 * @param r0
+	 */
+	static void storeToMem(RegNode r0) { //remove all names in reg linked list
+		RegNode name = r0.next;
+		while (name != null) {
+			genCode("move", "D0", name.id);
+			SymbolAttr sa = symbolTable.get(name.id);
+			symbolTable.put(name.id, new SymbolAttr(sa.type, sa.nextUse, "mem"));
+			name = name.next;
+		}
+	}
+
+	/**
+	 * check if any register is empty
+	 * @return empty register, MAX_REG otherwise
+	 */
+	static int emptyRegAvail() {
+		for (int i=0; i<MAX_REG; i++) {
+			RegNode head = regTable.get(i);
+			if (head.next == null)
+				return i;
+		}
+		return MAX_REG;
+	}
+
+	/**
+	 * find all basic blocks
+	 * @param qt
+	 * @param st
+	 */
+	static void findBasicBlock(ArrayList<Quad> qt, HashMap<String, SymbolAttr> st) {
+		basicBlockLeader.add(1);
+		for (int i = 1; i<qt.size(); i++) {
+			Quad q = qt.get(i);
+			
+			if ( (q.op).equals("jeqz") || (q.op).equals("jump") || (q.op).equals("exit") ) {
+				//System.out.println("Quad " + i + ": " + q.loc);
+				int leader = Integer.parseInt(q.loc);
+				if ( !basicBlockLeader.contains(leader) )
+					basicBlockLeader.add(leader);
+			}
+			
+			if ( (q.op).equals("jeqz") )
+				basicBlockLeader.add(i + 1);
+		}
+		
+		Collections.sort(basicBlockLeader);
+		
+		/*
+		System.out.print("Block leader: ");
+		for (int i = 0; i<basicBlockLeader.size(); i++) {
+			System.out.print(basicBlockLeader.get(i) + ", ");
+		}
+		System.out.println();
+		*/
+		
+		for (int i = 0; i<basicBlockLeader.size(); i++) {
+			//System.out.print(basicBlockLeader.get(i) + ", ");
+			if (basicBlockLeader.get(i)>=qt.size())
+				break;
+			if (i+1==basicBlockLeader.size()) {
+				liveVarAnalysis(qt, basicBlockLeader.get(i), qt.size() - 1, st);
+				break;
+			}
+			liveVarAnalysis(qt, basicBlockLeader.get(i), basicBlockLeader.get(i+1) - 1, st);
+		}
+	}
+
+	/**
+	 * live variable analysis for a basic block
+	 * @param qt
+	 * @param first
+	 * @param last
+	 * @param st
+	 */
+	static void liveVarAnalysis(ArrayList<Quad> qt, int first, int last, HashMap<String, SymbolAttr> st) {
+		//System.out.println("Live Variable Analysing... " + first + " - " + last);
+		for (int i = last; i >= first; i--) {
+			SymbolAttr sa;
+			Quad q = qt.get(i);
+			//System.out.println("livevar: " + q.op + ", " + q.reg1 + ", " + q.r1nextUse + ", " + q.reg2 + ", " + q.r2nextUse + ", " + q.loc + ", " + q.locNextUse);
+			if ( (q.reg1 != null) && !(q.reg1).matches("[0-9]+") && st.containsKey(q.reg1) ) {
+				sa = st.get(q.reg1); //assume valid id
+				q.r1nextUse = sa.nextUse;
+				st.put(q.reg1, new SymbolAttr(sa.type, Integer.toString(i), sa.address));
+			}
+			
+			if ( (q.reg2 != null) && !(q.reg2).matches("[0-9]+") && st.containsKey(q.reg2) ) {
+				sa = st.get(q.reg2); //assume valid id
+				q.r2nextUse = sa.nextUse;
+				st.put(q.reg2, new SymbolAttr(sa.type, Integer.toString(i), sa.address));
+			}
+			
+			if ( q.loc!=null && !(q.loc).matches("[0-9]+") && st.containsKey(q.loc) ) {
+				sa = st.get(q.loc); //assume valid id
+				q.locNextUse = sa.nextUse;
+				st.put(q.loc, new SymbolAttr(sa.type, "0", sa.address));
+			}
+			//System.out.println("end: " + q.op + ", " + q.reg1 + ", " + q.r1nextUse + ", " + q.reg2 + ", " + q.r2nextUse + ", " + q.loc + ", " + q.locNextUse);
+		}
+	}
+
+	/**
+	 * fix jump and jeqz address in assembly code to their address quad's location
+	 */
+	static void fixJumpAddr() {
+		for (int i = 0; i<assemblyCode.size(); i++) {
+			AssemblyCode line = assemblyCode.get(i);
+			if (line.op.equals("jump") || line.op.equals("jeqz")) {
+				int q = Integer.parseInt(line.src);
+				if (q<quadAddress.size())
+					q = quadAddress.get(q);
+				else
+					q = assemblyCode.size();
+				//System.out.println("fix jump addr to quad "+line.src+" to "+q);
+				line.src = Integer.toString(q);
+			}
+		}
+	}
+
+	/**
+	 * write assembly code to file
+	 * @param fw
+	 * @throws IOException
+	 */
+	static void printAssemblyCode(FileWriter fw) throws IOException {
+		for (int i = 0; i<assemblyCode.size(); i++) {
+			AssemblyCode line = assemblyCode.get(i);
+			if (line.dst!=null)
+				fw.write(i+" "+line.op+" "+line.src+", "+line.dst+"\n");
+			else
+				fw.write(i+" "+line.op+" "+line.src+"\n");
+		}
+	}
+
+	/**
+	 * print Quad table
+	 * @param al
+	 */
+	static void printQuad(ArrayList<Quad> al) {
+		for (int i = 1; i < al.size(); i++) {
+			Quad curr = al.get(i);
+			System.out.println(i + " " + curr.op + ", " + curr.reg1 + ", " + curr.r1nextUse + ", " + curr.reg2 + ", " + curr.r2nextUse + ", " + curr.loc + ", " + curr.locNextUse);
+		}
+	}
+
+	/**
+	 * print Stack
+	 * @param s
+	 */
+	static void printStack(Stack<String> s) {
+		System.out.print("Stack: ");
+		while (!s.empty())
+			System.out.print(s.pop());
+		System.out.println();
+	}
+
+	/**
+	 * print Register table
+	 */
+	static void printRegTable() {
+		for (int i=0; i<MAX_REG; i++) {
+			RegNode reg = regTable.get(i);
+			System.out.print("r" + i + ": ");
+			while (reg!=null) {
+				System.out.print(reg.id + " ");
+				reg = reg.next;
+			}
+			System.out.println("");
+		}
+	}
+
+	/**
+	 * print Symbol table
+	 * @param hm
+	 */
+	static void printST(HashMap<String, SymbolAttr> hm) {
+		System.out.println("Symbol Table: ");
+		//hm.forEach( (k,v) -> System.out.println(k + " type:" + v.type + " addr:" + v.address) );
+		for(Map.Entry<String, SymbolAttr> entry : hm.entrySet()) {
+			String key = entry.getKey();
+			SymbolAttr value = entry.getValue();
+			System.out.println(key + ", " + value.type + ", " + value.nextUse + ", " + value.address);
+		}
+	}
+
+	/**
+	 * print Quad with their address in assembly code
+	 */
+	static void printQuadAddr() {
+		//System.out.println("Quad count: " + quadTable.size() + " - " + quadAddress.size() + " address entries");
+		for (int i=1; i<quadAddress.size(); i++) {
+			Quad q = quadTable.get(i);
+			System.out.println(i + " " + q.op + ", "+q.reg1+", "+q.reg2+", "+q.loc+" at "+quadAddress.get(i));
+		}
+	}
+
+	/**
+	 * get new temp
+	 * @return
+	 */
+	String newTemp() {
+		tempCount++;
+		String temp = "T" + Integer.toString(tempCount);
+		symbolTable.put(temp, new SymbolAttr("temp", "0", null));
+		return temp;
+	}
+
+	/**
+	 * create new quad and add it to quad table
+	 * @param op
+	 * @param reg1
+	 * @param r1nextUse
+	 * @param reg2
+	 * @param r2nextUse
+	 * @param loc
+	 * @param locNextUse
+	 */
+	void genQuad(String op, String reg1, String r1nextUse, String reg2, String r2nextUse, String loc, String locNextUse) {
+		Quad q = new Quad(op, reg1, r1nextUse, reg2, r2nextUse, loc, locNextUse);
+		quadTable.add(q);
+		nextQuad = Integer.toString(quadTable.size());
+	}
+
+	/**
+	 * fix Quad address
+	 * @param quad
+	 * @param nextQuad
+	 */
+	void backPatch(String quad, String nextQuad) {
+		int i = Integer.parseInt(quad);
+		while (i!=0) {
+			Quad q = quadTable.get(i);
+			i = Integer.parseInt(q.loc);
+			q.loc = nextQuad;
+		}
+	}
+}
+
+class Quad {
+	String op, reg1, r1nextUse, reg2, r2nextUse, loc, locNextUse;
+	public Quad(String op, String reg1, String r1nextUse, String reg2, String r2nextUse, String loc, String locNextUse) {
+		this.op = op;
+		this.reg1 = reg1;
+		this.r1nextUse = r1nextUse;
+		this.reg2 = reg2;
+		this.r2nextUse = r2nextUse;
+		this.loc = loc;
+		this.locNextUse = locNextUse;
+	}
+}
+
+class SymbolAttr {
+	String type, nextUse, address;
+	public SymbolAttr(String type, String nextUse, String address) {
+		this.type = type;
+		this.nextUse = nextUse;
+		this.address = address;
+	}
+}
+
+class RegNode {
+	String id;
+	RegNode next;
+	public RegNode(String id, RegNode next) {
+		this.id = id;
+		this.next = next;
+	}
+}
+
+class AssemblyCode {
+	String op, src, dst;
+	public AssemblyCode(String op, String src, String dst) {
+		this.op = op;
+		this.src = src;
+		this.dst = dst;
+	}
+}
+
+PARSER_END(Compiler)
+
+SKIP : { " " | "\t" | "\n" | "\r" }
+SPECIAL_TOKEN : { < SINGLE_LINE_COMMENT: "//"(~["\n","\r"])* ("\n"|"\r"|"\r\n")? > }
+//TOKEN : { < EOL : "\n" | "\r" | "\r\n" | "\n\r" > }
+TOKEN : { < ELSE : "else" | "ELSE" > | < ELSIF : "elsif" | "ELSIF" > | < END : "end" | "END" > | < GET : "get" | "GET" >
+		| < EXIT : "exit" | "EXIT" > | < IF : "if" | "IF" > | < LOOP : "loop" | "LOOP" > | < PUT : "put" | "PUT" >
+		| < THEN : "then" | "THEN" > | < WHILE : "while" | "WHILE" > | < SQRT : "sqrt" | "SQRT" > | < ABS : "abs" | "ABS" >}
+TOKEN : { < INTEGER : (<DIGIT>)+ > }
+TOKEN : { < #DIGIT : ["0"-"9"] > }
+TOKEN : { < ID : <LETTER> (<LETTER> | <DIGIT>)* > }
+TOKEN : { < #LETTER : ["a"-"z","A"-"Z"] > }
+TOKEN : { < ADD : "+" | "-" > | < MUL : "*" | "/" > }
+TOKEN : { < UNARY : "^" > }
+TOKEN : { < REL : "<" | "<=" | "=" | "/=" | ">=" | ">" > }
+TOKEN : { < OR : "|" > | < AND : "&" > | < ASSIGN : ":=" > }
+TOKEN : { < OPEN_PAR : "(" > | < CLOSE_PAR : ")" > | < SEMICOL : ";" > | < COL : ":" > | < COMMA : "," > }
+//TOKEN : { < QUOTE : "\"" > | < CHAR : ~["\""] > } //doesn't work
+TOKEN : { <STRING : "\"" (<CHAR>)* "\"" > | <CHAR : ~["\""] > }
+
+void Start():
+{}
+{
+	(
+		Statement()
+		//<EOL>
+	)*
+}
+
+void Statement():
+{ 
+	Token t; 
+	String a, b;
+	//boolean loop_has_id = false;
+}
+{
+	{ System.out.print("Statement "); }
+	( 
+		(
+			t = <ID>
+			{ System.out.print(t.image); 
+				//semantic action
+				//aStack.push("0");
+				//symbolTable.put(t.image, new SymbolAttr("label", "infty", "mem")); //if loop id then loc = 0, if not then mem
+			}
+			(
+				( 
+					<COL> 
+					{ System.out.print(":");
+						//semantic action
+						// a = aStack.pop(); //pop after read id //pop 0 at the end of loop
+						if (symbolTable.containsKey(t.image)) {
+							System.out.println("Conflicting ID error: " + t.image + " is already used");
+							System.exit(0);
+						}
+						symbolTable.put(t.image, new SymbolAttr("label", "infty", "0"));
+						aStack.push(t.image);
+						//loop_has_id = true;
+					} 
+					Loop(true)
+				)
+				|
+				(
+					{ aStack.push(t.image); symbolTable.put(t.image, new SymbolAttr("label", "infty", "mem")); }
+					Assignment()
+				)
+			)
+		)
+		| Loop(false) | If() | Exit() | Get() | Put() 
+		//compile if assignment before loop
+	)
+	t = <SEMICOL>
+	{ System.out.println(t.image); }
+}
+
+void Loop(boolean has_id):
+{ 
+	Token t; 
+	String a, b;
+}
+{	
+	{	//semantic action
+		aStack.push(nextQuad); //next quad
+		aStack.push("0");
+		//if (has_id)
+		//	System.out.println("Loop has label");
+	}
+	[
+		<WHILE> 
+		{ System.out.print("While "); }
+		Expression()
+		{
+			a = aStack.pop(); //value of expr
+			b = aStack.pop(); //get 0 on stack
+			aStack.push(nextQuad);
+			genQuad("jeqz", a, "0", null, "0", "0", "0");
+		}
+	]
+	<LOOP> 
+	{ System.out.print(" Loop "); }
+	( Statement() )*
+	{
+		a = aStack.pop();
+		b = aStack.pop();
+		genQuad("jump", null, "0", null, "0", b, "0");
+		Quad q = quadTable.get(Integer.parseInt(a)); //if a = 0 then doesn't matter
+		q.loc = nextQuad;
+	}
+	<END> <LOOP>
+	{ System.out.println("End Loop"); 
+		//semantic action
+		//a = aStack.pop();
+		if (has_id) {
+			a = aStack.pop();
+			System.out.println("Loop label: " + a);
+			SymbolAttr attr = symbolTable.get(a);
+			backPatch(attr.address, nextQuad);
+			//dont with loop => remove label from ST
+			symbolTable.remove(a);
+			System.out.println("remove label: " + a);
+		}
+	}
+}
+
+void If():
+{ 
+	Token t; 
+	String a, b;
+}
+{
+	<IF>
+	{ System.out.print("If "); }
+	Expression()
+	{	//Semantic action
+		a = aStack.pop();
+		aStack.push("0");
+		aStack.push(nextQuad); //next quad
+		genQuad("jeqz", a, "0", null, "0", "0", "0");
+	}
+	<THEN>
+	{ System.out.println(" Then "); }
+	( Statement() )*
+	(
+		<ELSIF>
+		{ System.out.println("Elsif "); 
+			//Semantic action
+			a = aStack.pop();
+			b = aStack.pop();
+			aStack.push(nextQuad);
+			genQuad("jump", null, "0", null, "0", b, "0");
+			Quad q = quadTable.get(Integer.parseInt(a));
+			q.loc = nextQuad;
+		}
+		Expression()
+		{	//semantic action
+			a = aStack.pop();
+			aStack.push(nextQuad);
+			genQuad("jeqz", a, "0", null, "0", "0", "0");
+		}
+		<THEN> 
+		{ System.out.println("Then "); }
+		( Statement() )*
+	)*
+	[
+		<ELSE> 
+		{ System.out.println("Else "); 
+			//semantic action
+			a = aStack.pop();
+			aStack.push(nextQuad);
+			genQuad("jump", null, "0", null, "0", "0", "0");
+			Quad q = quadTable.get(Integer.parseInt(a));
+			q.loc = nextQuad;
+		}
+		( Statement() )*
+	]
+	{
+		a = aStack.pop();
+		b = aStack.pop();
+		backPatch(b, nextQuad);
+		Quad q = quadTable.get(Integer.parseInt(a));
+		q.loc = nextQuad;
+	}
+	<END> <IF>
+	{ System.out.print("End If "); }
+}
+
+void Exit():
+{ Token t; }
+{
+	<EXIT>
+	t = <ID>
+	{ 	//not deal with out of scope exit 
+		System.out.print("Exit "+t.image);
+		if (symbolTable.containsKey(t.image)) {
+			SymbolAttr attr = symbolTable.get(t.image);
+			symbolTable.put(t.image, new SymbolAttr("label", "infty", nextQuad));			
+			genQuad("jump", t.image, "0", null, "0", attr.address, "0");
+		} else {
+			System.out.println("Invalid Exit: ID does not exist or out of scope");
+			System.exit(0);
+		}
+	}
+
+}
+
+void Get():
+{ Token t; }
+{
+	<GET> <OPEN_PAR> Input_List() <CLOSE_PAR>
+}
+
+void Input_List():
+{ Token t; }
+{
+	t = <ID> 
+	{ System.out.print("Read ( " + t.image); 
+		//semantic action
+		genQuad("read", null, "0", null, "0", t.image, "0");
+	}
+	( 
+		<COMMA> t = <ID> 
+		{ System.out.print(", " + t.image); 
+			//semantic action
+			genQuad("read", null, "0", null, "0", t.image, "0");
+		}
+	)*
+	{ System.out.print(" )"); }
+}
+
+void Put():
+{ Token t; }
+{
+	<PUT> <OPEN_PAR> Output_List() <CLOSE_PAR>
+}
+
+void Output_List():
+{ 
+	Token t; 
+	String a;
+}
+{
+	{ System.out.print("Write ( "); }
+	( 
+		( 
+			String()
+			{
+				a = aStack.pop();
+				genQuad("writeStr", a, "0", null, "0", null, "0");
+			}
+		)
+		| 
+		( 
+			Expression()
+			{
+				a = aStack.pop();
+				genQuad("writeInt", a, "0", null, "0", null, "0");
+			}
+		)
+	)
+	(
+		<COMMA> 
+		(  
+			( 
+				String() 
+				{ 
+					a = aStack.pop();
+					genQuad("writeStr", a, "0", null, "0", null, "0");
+				}
+			)
+			| 
+			( 
+				Expression()
+				{
+					a = aStack.pop();
+					genQuad("writeInt", a, "0", null, "0", null, "0");
+				}
+			)
+		)
+	)*
+	{ System.out.print(" )"); }
+}
+
+void Assignment():
+{ 
+	Token t; 
+	String a, b;
+}
+{	
+	//t = <ID>
+	//{ System.out.print(t.image); }
+	<ASSIGN> 
+	{ System.out.print(" := "); 
+		//a = aStack.pop(); //get 0 off stack 
+	}
+	( Expression() | String() )
+	{ System.out.print(" (assignment) "); 
+		a = aStack.pop();
+		b = aStack.pop();
+		//Quad q = new Quad("=", a, null, b);
+		//quadTable.add(q);
+		genQuad("assign", a, "0", null, "0", b, "0");
+	} //still add Quad even if statement has no ;
+}
+
+void String():
+{ Token t; }
+{	
+	t = <STRING>
+	{ System.out.print("(str) " + t.image); aStack.push(t.image); }
+}
+
+void Expression():
+{ String a,b,c; }
+{
+	{ System.out.print("(expr) "); }
+	And()
+	( 
+		<OR>
+		{ System.out.print(" or "); }
+		And()
+		{
+			a = aStack.pop();
+			b = aStack.pop();
+			c = newTemp();
+			//Quad q = new Quad("or", b, a, c);
+			//quadTable.add(q);
+			genQuad("or", b, "0", a, "0", c, "0");
+			aStack.push(c);
+		}
+	)*
+}
+
+void And():
+{ String a,b,c; }
+{
+	Rel()
+	(
+		<AND>
+		{ System.out.print(" and "); }
+		Rel()
+		{
+			a = aStack.pop();
+			b = aStack.pop();
+			c = newTemp();
+			//Quad q = new Quad("and", b, a, c);
+			//quadTable.add(q);
+			genQuad("and", b, "0", a, "0", c, "0");
+			aStack.push(c);
+		}
+	)*
+}
+
+void Rel():
+{ 
+	Token t; 
+	String a, b, c;
+}
+{
+	Term()
+	(
+		t = <REL>
+		{ System.out.print(" " + t.image + " "); }
+		Term()
+		{
+			a = aStack.pop();
+			b = aStack.pop();
+			c = newTemp();
+			//Quad q = new Quad(t.image, b, a, c);
+			//quadTable.add(q);
+			genQuad(t.image, b, "0", a, "0", c, "0");
+			aStack.push(c);
+		}
+	)*
+}
+
+void Term():
+{ 
+	Token t; 
+	String a, b, c;
+}
+{
+	Factor()
+	(
+		t = <ADD>
+		{ System.out.print(" " + t.image + " "); }
+		Factor()
+		{
+			a = aStack.pop();
+			b = aStack.pop();
+			c = newTemp();
+			//Quad q = new Quad(t.image, b, a, c);
+			//quadTable.add(q);
+			genQuad(t.image, b, "0", a, "0", c, "0");
+			aStack.push(c);
+		}
+	)*
+}
+
+void Factor():
+{ 
+	Token t; 
+	String a, b, c;
+}
+{
+	Primary()
+	(
+		t = <MUL>
+		{ System.out.print(" " + t.image + " "); }
+		Primary()
+		{ 
+			a = aStack.pop();
+			b = aStack.pop();
+			c = newTemp();
+			//Quad q = new Quad(t.image, b, a, c);
+			//quadTable.add(q);
+			genQuad(t.image, b, "0", a, "0", c, "0");
+			aStack.push(c);
+		}
+	)*
+}
+
+void Primary():
+{ 
+	Token t; 
+	String a, b, c;
+}
+{
+	{ aStack.push("$"); }
+	( //must put push and print in parenthesis otherwise not print UNARY
+		( t = <UNARY> { 
+			System.out.print(" " + t.image + " "); 
+			aStack.push(t.image);
+		} ) | ( t = <ADD> { 
+			System.out.print(" " + t.image + " "); 
+			aStack.push(t.image);
+		} )
+		
+		
+	)*
+	Unit()
+	{
+		a = aStack.pop();
+		b = aStack.pop();
+		if (b.equals("$"))
+			aStack.push(a);
+		else {
+			c = a;
+			while (!b.equals("$")) {
+				c = newTemp();
+				//System.out.println("Caculate unary");
+				//Quad q = new Quad(b, a, null, c);
+				genQuad(b, a, "0", null, "0", c, "0");
+				b = aStack.pop();
+			}
+			aStack.push(c);
+		}
+	}
+}
+
+void Unit():
+{ 
+	Token t;
+	String a, b, c;
+}
+{
+	( 
+		t = <ID>
+		{ System.out.print(t.image); aStack.push(t.image); symbolTable.put(t.image, new SymbolAttr("label", "infty", "mem")); }
+	)
+	|
+	(
+		t = <INTEGER>
+		{ System.out.print(t.image); aStack.push(t.image); }
+	)
+	|
+	(	
+		{ aStack.push("0"); }
+		[  
+			( <SQRT> { System.out.print("sqrt"); aStack.push("sqrt"); } )
+			| 
+			( <ABS> { System.out.print("abs"); aStack.push("abs"); } )
+		] 
+		<OPEN_PAR> 
+		{ System.out.print("("); }
+		Expression() 
+		<CLOSE_PAR>
+		{ System.out.print(")"); 
+			//semantic action
+			a = aStack.pop(); //value of expr
+			b = aStack.pop(); //0 or sqrt or abs
+			if (!b.equals("0")) {
+				c = newTemp();
+				genQuad(b, a, "0", null, "0", c, "0");
+				b = aStack.pop(); //get 0 off stack
+				aStack.push(c);
+			} else
+				aStack.push(a);
+		}
+	)
+}

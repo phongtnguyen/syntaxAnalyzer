@@ -1,0 +1,124 @@
+0 move #5, D0
+1 sqrt D0
+2 move c, D1
+3 cmp 0, D1
+4 jge *+2
+5 neg D1
+6 add D1, D0
+7 move #5, D1
+8 neg D1
+9 move #3, D2
+10 add D2, D1
+11 move #5, D2
+12 neg D2
+13 cmp 0, D2
+14 jge *+2
+15 neg D2
+16 not D1
+17 sub D1, D2
+18 move D0, D1
+19 cmp 0, D1
+20 jeq *+3
+21 clr D1
+22 bra *+2
+23 move #1, D1
+24 move c, D3
+25 move D0, a
+26 move D1, b
+27 move D2, d
+28 tst D3
+29 jeqz 84
+30 move D0, a
+31 move D1, b
+32 move D2, d
+33 move c, D3
+34 move D0, a
+35 move D1, b
+36 move D2, d
+37 tst D3
+38 jeqz 77
+39 move D0, a
+40 move D1, b
+41 move D2, d
+42 move D2, D3
+43 div #2, D3
+44 cmp 0, D2
+45 jeq *+3
+46 clr D2
+47 bra *+2
+48 move #1, D2
+49 move D0, a
+50 move D1, b
+51 move D2, T13
+52 move D3, c
+53 tst D2
+54 jeqz 68
+55 move D0, a
+56 move D1, b
+57 move D2, T13
+58 move D3, c
+59 move D0, a
+60 move D1, b
+61 move D2, T13
+62 move D3, c
+63 jump 77
+64 move D0, a
+65 move D1, b
+66 move D2, T13
+67 move D3, c
+68 move D0, a
+69 move D1, b
+70 move D2, T13
+71 move D3, c
+72 jump 33
+73 move D0, a
+74 move D1, b
+75 move D2, T13
+76 move D3, c
+77 move D0, a
+78 move #5, D0
+79 or D0, D3
+80 move D0, x
+81 move D1, b
+82 move D2, T13
+83 move D3, c
+84 move D0, x
+85 move a, D0
+86 move D0, a
+87 move $"result ", D0
+88 move a, D0
+89 move D0, a
+90 move x, D0
+91 cmp 5, D0
+92 jge *+3
+93 clr D0
+94 bra *+2
+95 move #1, D0
+96 move D0, T15
+97 move D1, b
+98 move D2, T13
+99 move D3, c
+100 tst D0
+101 jeqz 115
+102 move D0, T15
+103 move D1, b
+104 move D2, T13
+105 move D3, c
+106 move D0, T15
+107 move D1, b
+108 move D2, T13
+109 move D3, c
+110 jump 124
+111 move D0, T15
+112 move D1, b
+113 move D2, T13
+114 move D3, c
+115 move D0, T15
+116 move D1, b
+117 move D2, T13
+118 move D3, c
+119 jump 84
+120 move D0, T15
+121 move D1, b
+122 move D2, T13
+123 move D3, c
